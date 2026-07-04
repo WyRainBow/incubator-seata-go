@@ -26,11 +26,13 @@
 ### feature：
 
   - [[#123](https://github.com/apache/incubator-seata-go/pull/123)] add two phase and dubbo
+  - support PostgreSQL XA via pgx driver
 
 ### bugfix：
 
   - [[#130](https://github.com/apache/incubator-seata-go/pull/130)] getty session auto close bug
   - [[#991](https://github.com/apache/incubator-seata-go/issues/991)] fix connection leaks and prevent nil pointer panic in async worker
+  - [[#887](https://github.com/apache/incubator-seata-go/issues/887)] make DayValue serialization timezone-stable
 
 ### optimize：
 
