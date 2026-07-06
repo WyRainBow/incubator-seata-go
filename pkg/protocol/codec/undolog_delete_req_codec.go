@@ -30,14 +30,19 @@ func (u *UndoLogDeleteRequestCodec) Decode(in []byte) interface{} {
 	data := message.UndoLogDeleteRequest{}
 	buf := bytes.NewByteBuffer(in)
 
+	branchType, err := buf.ReadByte()
+	if err != nil {
+		log.Errorf("failed to decode UndoLogDeleteRequest branchType: %v", err)
+		return nil
+	}
+	data.BranchType = branch.BranchType(branchType)
 	data.ResourceId = bytes.ReadString16Length(buf)
 	saveDays, err := buf.ReadUint16()
 	if err != nil {
-		log.Errorf("failed to read SaveDays: %v", err)
-		return data
+		log.Errorf("failed to decode UndoLogDeleteRequest saveDays: %v", err)
+		return nil
 	}
 	data.SaveDays = int16(saveDays)
-	data.BranchType = branch.BranchType(bytes.ReadByte(buf))
 
 	return data
 }
@@ -46,9 +51,9 @@ func (u *UndoLogDeleteRequestCodec) Encode(in interface{}) []byte {
 	data, _ := in.(message.UndoLogDeleteRequest)
 	buf := bytes.NewByteBuffer([]byte{})
 
+	buf.WriteByte(byte(data.BranchType))
 	bytes.WriteString16Length(data.ResourceId, buf)
 	buf.WriteUint16(uint16(data.SaveDays))
-	buf.WriteByte(byte(data.BranchType))
 
 	return buf.Bytes()
 }

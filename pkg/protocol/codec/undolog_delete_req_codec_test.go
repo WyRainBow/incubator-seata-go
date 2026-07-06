@@ -192,6 +192,50 @@ func TestUndoLogDeleteRequestCodec_GetMessageType(t *testing.T) {
 		"message type should be MessageTypeRmDeleteUndolog (111)")
 }
 
+// TestUndoLogDeleteRequestCodec_JavaWireFormat locks the byte layout to the Java
+// UndoLogDeleteRequestCodec, which is what the TC server actually sends:
+// branchType(1 byte) + resourceId(2-byte length + UTF8 bytes) + saveDays(2 bytes).
+// A pure encode/decode round-trip cannot catch a wrong field order; only a fixed
+// byte vector can.
+func TestUndoLogDeleteRequestCodec_JavaWireFormat(t *testing.T) {
+	c := &UndoLogDeleteRequestCodec{}
+
+	resourceId := "jdbc:mysql://127.0.0.1:3306/seata"
+	javaBytes := []byte{0x00} // BranchType.AT ordinal
+	javaBytes = append(javaBytes, byte(len(resourceId)>>8), byte(len(resourceId)))
+	javaBytes = append(javaBytes, resourceId...)
+	javaBytes = append(javaBytes, 0x00, 0x07) // saveDays = 7
+
+	decoded := c.Decode(javaBytes)
+	req, ok := decoded.(message.UndoLogDeleteRequest)
+	assert.True(t, ok, "decoded result should be UndoLogDeleteRequest type")
+	assert.Equal(t, branch.BranchTypeAT, req.BranchType)
+	assert.Equal(t, resourceId, req.ResourceId)
+	assert.Equal(t, int16(7), req.SaveDays)
+
+	// Encode must produce exactly the same bytes the Java codec would.
+	assert.Equal(t, javaBytes, c.Encode(req))
+}
+
+func TestUndoLogDeleteRequestCodec_DecodeMalformed(t *testing.T) {
+	c := &UndoLogDeleteRequestCodec{}
+
+	tests := []struct {
+		name string
+		in   []byte
+	}{
+		{name: "empty input", in: []byte{}},
+		{name: "branch type only", in: []byte{0x00}},
+		{name: "missing save days", in: []byte{0x00, 0x00, 0x01, 'a'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Nil(t, c.Decode(tt.in), "malformed input should be rejected with nil")
+		})
+	}
+}
+
 func TestUndoLogDeleteRequestCodec_Integration(t *testing.T) {
 	Init()
 

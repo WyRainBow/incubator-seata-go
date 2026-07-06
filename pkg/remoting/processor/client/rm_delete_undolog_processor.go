@@ -44,7 +44,9 @@ type rmDeleteUndoLogProcessor struct{}
 func (r *rmDeleteUndoLogProcessor) Process(ctx context.Context, rpcMessage message.RpcMessage) error {
 	req, ok := rpcMessage.Body.(message.UndoLogDeleteRequest)
 	if !ok {
-		return fmt.Errorf("invalid message body type: %T", rpcMessage.Body)
+		err := fmt.Errorf("invalid message body type: %T, expected message.UndoLogDeleteRequest", rpcMessage.Body)
+		log.Errorf("rmDeleteUndoLogProcessor: %v", err)
+		return err
 	}
 
 	if req.BranchType != branch.BranchTypeAT {
