@@ -60,6 +60,7 @@ func (r *rmDeleteUndoLogProcessor) Process(ctx context.Context, rpcMessage messa
 	if err := r.deleteExpiredUndoLog(ctx, req); err != nil {
 		log.Errorf("failed to delete expired undo log: resourceId=%s, saveDays=%d, err=%v",
 			req.ResourceId, req.SaveDays, err)
+		return err
 	}
 
 	return nil
@@ -73,12 +74,16 @@ type dbResource interface {
 func (r *rmDeleteUndoLogProcessor) deleteExpiredUndoLog(ctx context.Context, req message.UndoLogDeleteRequest) error {
 	resMgr, err := safeGetResourceManager(req.BranchType)
 	if err != nil {
-		return err
+		// no AT resource manager on this client, nothing to clean up
+		log.Infof("skip undo log delete, no AT resource manager: %v", err)
+		return nil
 	}
 
 	val, ok := resMgr.GetCachedResources().Load(req.ResourceId)
 	if !ok {
-		return fmt.Errorf("resource not found in cache: %s", req.ResourceId)
+		// resource not managed by this client (normal for a broadcast request)
+		log.Infof("skip undo log delete, resource not managed by this client: %s", req.ResourceId)
+		return nil
 	}
 
 	res, ok := val.(dbResource)

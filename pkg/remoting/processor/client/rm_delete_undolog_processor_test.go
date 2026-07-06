@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"seata.apache.org/seata-go/v2/pkg/datasource/sql/undo"
 	"seata.apache.org/seata-go/v2/pkg/protocol/branch"
 	"seata.apache.org/seata-go/v2/pkg/protocol/message"
+	"seata.apache.org/seata-go/v2/pkg/rm"
 )
 
 func TestProcess_InvalidBodyType(t *testing.T) {
@@ -63,9 +65,9 @@ func TestProcess_ResourceNotFound_ReturnsNil(t *testing.T) {
 			BranchType: branch.BranchTypeAT,
 		},
 	})
-	// GetResourceManager panic 和 resource 不在缓存，都会被 deleteExpiredUndoLog
-	// 的调用方吞掉记日志，Process 必须返回 nil
-	assert.NoError(t, err, "TC one-way: all internal errors must be swallowed")
+	// no AT resource manager / resource not managed by this client is a normal
+	// skip (the request is broadcast), so Process returns nil rather than an error
+	assert.NoError(t, err, "unmanaged resource should be skipped, not treated as an error")
 }
 
 func TestProcess_NegativeSaveDays_ReturnsNil(t *testing.T) {
@@ -87,6 +89,39 @@ type mockDBResource struct {
 
 func (m *mockDBResource) GetDB() *sql.DB          { return m.db }
 func (m *mockDBResource) GetDbType() types.DBType { return m.dbType }
+
+// fakeATResourceManager is a minimal AT resource manager that only exposes a cached
+// resource, so the processor can reach the delete path in tests.
+type fakeATResourceManager struct {
+	rm.ResourceManager
+	cache *sync.Map
+}
+
+func (f *fakeATResourceManager) GetBranchType() branch.BranchType { return branch.BranchTypeAT }
+func (f *fakeATResourceManager) GetCachedResources() *sync.Map    { return f.cache }
+
+// TestProcess_RealError_Propagates verifies that a real internal failure while
+// deleting (here: no undo log manager for the resource's db type) is surfaced by
+// Process instead of being swallowed, while unmanaged resources are still skipped.
+func TestProcess_RealError_Propagates(t *testing.T) {
+	db, _, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	cache := &sync.Map{}
+	cache.Store("res-real-err", &mockDBResource{db: db, dbType: types.DBType(99)})
+	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: cache})
+
+	p := &rmDeleteUndoLogProcessor{}
+	err = p.Process(context.Background(), message.RpcMessage{
+		Body: message.UndoLogDeleteRequest{
+			ResourceId: "res-real-err",
+			SaveDays:   7,
+			BranchType: branch.BranchTypeAT,
+		},
+	})
+	assert.Error(t, err, "a real internal failure must propagate through Process")
+}
 
 func TestBatchDeleteByLogCreated_DeletesRows(t *testing.T) {
 	db, mock, err := sqlmock.New()
