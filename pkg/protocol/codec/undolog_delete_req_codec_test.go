@@ -227,6 +227,7 @@ func TestUndoLogDeleteRequestCodec_DecodeMalformed(t *testing.T) {
 		{name: "empty input", in: []byte{}},
 		{name: "branch type only", in: []byte{0x00}},
 		{name: "missing save days", in: []byte{0x00, 0x00, 0x01, 'a'}},
+		{name: "truncated resourceId (declares 10 bytes, only 3 provided)", in: []byte{0x00, 0x00, 0x0A, 'a', 'b', 'c'}},
 	}
 
 	for _, tt := range tests {

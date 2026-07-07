@@ -51,6 +51,7 @@ func (u *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.StringVar(&u.LogSerialization, prefix+".log-serialization", "json", "Serialization method.")
 	f.StringVar(&u.LogTable, prefix+".log-table", "undo_log", "undo log table name.")
 	f.BoolVar(&u.OnlyCareUpdateColumns, prefix+".only-care-update-columns", true, "The switch for degrade check.")
+	f.IntVar(&u.DeleteBatchSize, prefix+".delete-batch-size", 1000, "The batch size when deleting expired undo log.")
 	u.CompressConfig.RegisterFlagsWithPrefix(prefix+".compress", f)
 }
 

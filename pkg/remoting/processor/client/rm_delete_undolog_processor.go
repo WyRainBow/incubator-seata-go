@@ -111,6 +111,13 @@ func (r *rmDeleteUndoLogProcessor) deleteExpiredUndoLog(ctx context.Context, req
 		return nil
 	}
 
+	if req.SaveDays <= 0 {
+		// a non-positive saveDays would push the cutoff to today/the future and
+		// delete far more undo logs than intended; skip rather than guess a default
+		log.Errorf("skip undo log delete, invalid saveDays: resourceId=%s, saveDays=%d", req.ResourceId, req.SaveDays)
+		return fmt.Errorf("invalid saveDays %d for resourceId %s", req.SaveDays, req.ResourceId)
+	}
+
 	before := time.Now().AddDate(0, 0, -int(req.SaveDays))
 	return r.batchDeleteByLogCreated(ctx, conn, before)
 }
