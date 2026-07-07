@@ -19,7 +19,6 @@ package flagext
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,17 +69,12 @@ func TestDayValueYAML(t *testing.T) {
 		assert.Equal(t, testStruct, actualStruct)
 	}
 	// Test UTC-stable string and YAML serialization in western timezones.
+	// DayValue serializes through .UTC() and parses date-only strings as UTC, so
+	// the result is independent of the process local timezone. We therefore do NOT
+	// mutate the global time.Local here: doing so races with the Go runtime's
+	// background timer goroutine (which reads time.Local via time.Now()) under
+	// -race, and has no effect on the code under test anyway.
 	{
-		loc, err := time.LoadLocation("America/Los_Angeles")
-		if err != nil {
-			loc = time.FixedZone("UTC-8", -8*60*60)
-		}
-
-		originalLocal := time.Local
-		time.Local = loc
-		defer func() {
-			time.Local = originalLocal
-		}()
 		type TestStruct struct {
 			Day *DayValue `yaml:"day"`
 		}
