@@ -18,8 +18,6 @@
 package codec
 
 import (
-	"io"
-
 	"seata.apache.org/seata-go/v2/pkg/protocol/branch"
 	"seata.apache.org/seata-go/v2/pkg/protocol/message"
 	"seata.apache.org/seata-go/v2/pkg/util/bytes"
@@ -38,29 +36,7 @@ func (u *UndoLogDeleteRequestCodec) Decode(in []byte) interface{} {
 		return nil
 	}
 	data.BranchType = branch.BranchType(branchType)
-
-	// ReadString16Length ignores short reads/errors, which would silently accept a
-	// truncated ResourceId; read and validate the length-prefixed bytes explicitly
-	// so a malformed body is rejected here instead of possibly slipping through.
-	resourceIdLen, err := buf.ReadUint16()
-	if err != nil {
-		log.Errorf("failed to decode UndoLogDeleteRequest resourceId length: %v", err)
-		return nil
-	}
-	resourceIdBytes := make([]byte, resourceIdLen)
-	if resourceIdLen > 0 {
-		n, err := buf.Read(resourceIdBytes)
-		if err != nil {
-			log.Errorf("failed to decode UndoLogDeleteRequest resourceId: %v", err)
-			return nil
-		}
-		if n < int(resourceIdLen) {
-			log.Errorf("failed to decode UndoLogDeleteRequest resourceId: %v", io.ErrShortBuffer)
-			return nil
-		}
-	}
-	data.ResourceId = string(resourceIdBytes)
-
+	data.ResourceId = bytes.ReadString16Length(buf)
 	saveDays, err := buf.ReadUint16()
 	if err != nil {
 		log.Errorf("failed to decode UndoLogDeleteRequest saveDays: %v", err)
