@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"seata.apache.org/seata-go/v2/pkg/datasource/sql/types"
 	"seata.apache.org/seata-go/v2/pkg/datasource/sql/undo"
+	mysqlundo "seata.apache.org/seata-go/v2/pkg/datasource/sql/undo/mysql"
 	"seata.apache.org/seata-go/v2/pkg/protocol/branch"
 	"seata.apache.org/seata-go/v2/pkg/protocol/message"
 	"seata.apache.org/seata-go/v2/pkg/rm"
@@ -121,6 +122,65 @@ func TestProcess_RealError_Propagates(t *testing.T) {
 		},
 	})
 	assert.Error(t, err, "a real internal failure must propagate through Process")
+}
+
+// TestProcess_EndToEnd_DeletesExpiredUndoLog drives the full happy path:
+// Process -> deleteExpiredUndoLog -> HasUndoLogTable -> batchDeleteByLogCreated.
+// It is the only test that exercises the resource-found branch (resource in cache,
+// implements dbResource, table exists), covering lines that pure unit tests skip
+// because they short-circuit at "no AT resource manager".
+func TestProcess_EndToEnd_DeletesExpiredUndoLog(t *testing.T) {
+	// make sure a MySQL undo log manager is registered for this test
+	undo.RegisterUndoLogManager(mysqlundo.NewUndoLogManager())
+
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	const resourceID = "jdbc:mysql://127.0.0.1:3306/seata"
+	cache := &sync.Map{}
+	cache.Store(resourceID, &mockDBResource{db: db, dbType: types.DBTypeMySQL})
+	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: cache})
+
+	// HasUndoLogTable issues "SELECT 1 FROM undo_log LIMIT 1" -> table exists
+	mock.ExpectQuery("SELECT 1 FROM undo_log LIMIT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	// first batch is full -> loop once more; second batch is partial -> stop
+	mock.ExpectExec("DELETE FROM undo_log WHERE log_created <= ?").
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, defaultDeleteBatchSize))
+	mock.ExpectExec("DELETE FROM undo_log WHERE log_created <= ?").
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 10))
+
+	p := &rmDeleteUndoLogProcessor{}
+	err = p.Process(context.Background(), message.RpcMessage{
+		Body: message.UndoLogDeleteRequest{
+			ResourceId: resourceID,
+			SaveDays:   7,
+			BranchType: branch.BranchTypeAT,
+		},
+	})
+	assert.NoError(t, err, "end-to-end delete should succeed")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProcess_ResourceNotInCache_Skipped covers the broadcast-skip branch: an AT
+// resource manager is registered, but the requested resourceId is not managed by
+// this client. Process must return nil (the request is broadcast to all clients).
+func TestProcess_ResourceNotInCache_Skipped(t *testing.T) {
+	// register an AT manager with an empty cache (no resources managed)
+	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: &sync.Map{}})
+
+	p := &rmDeleteUndoLogProcessor{}
+	err := p.Process(context.Background(), message.RpcMessage{
+		Body: message.UndoLogDeleteRequest{
+			ResourceId: "jdbc:mysql://another-client:3306/seata",
+			SaveDays:   7,
+			BranchType: branch.BranchTypeAT,
+		},
+	})
+	assert.NoError(t, err, "unmanaged resource on a broadcast request should be skipped, not error")
 }
 
 func TestBatchDeleteByLogCreated_DeletesRows(t *testing.T) {
