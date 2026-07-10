@@ -139,7 +139,10 @@ func (r *rmDeleteUndoLogProcessor) batchDeleteByLogCreated(ctx context.Context, 
 		if err != nil {
 			return fmt.Errorf("exec delete: %w", err)
 		}
-		affected, _ := result.RowsAffected()
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("get rows affected: %w", err)
+		}
 		totalAffected += affected
 		if affected < int64(batchSize) {
 			break

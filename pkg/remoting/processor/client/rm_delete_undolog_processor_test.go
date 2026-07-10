@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -279,6 +280,31 @@ func TestBatchDeleteByLogCreated_DBError(t *testing.T) {
 	p := &rmDeleteUndoLogProcessor{}
 	err = p.batchDeleteByLogCreated(context.Background(), conn, time.Now())
 	assert.Error(t, err)
+}
+
+// TestBatchDeleteByLogCreated_RowsAffectedError verifies that an error from
+// RowsAffected() (e.g. driver returns -1 affected on a successful exec) is
+// surfaced instead of being swallowed. Before the fix, affected=-1 would
+// trigger an early `break` (since -1 < batchSize), silently leaving old
+// undo_log rows un-deleted while reporting success.
+func TestBatchDeleteByLogCreated_RowsAffectedError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mock.ExpectExec("DELETE FROM undo_log WHERE log_created <= ?").
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewErrorResult(errors.New("driver does not support RowsAffected")))
+
+	conn, err := db.Conn(context.Background())
+	assert.NoError(t, err)
+	defer conn.Close()
+
+	p := &rmDeleteUndoLogProcessor{}
+	err = p.batchDeleteByLogCreated(context.Background(), conn, time.Now())
+	assert.Error(t, err, "RowsAffected error must propagate, not be swallowed")
+	assert.Contains(t, err.Error(), "rows affected")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 func BenchmarkProcess_NonAT(b *testing.B) {
