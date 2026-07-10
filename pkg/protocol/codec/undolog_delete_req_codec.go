@@ -48,7 +48,7 @@ func (u *UndoLogDeleteRequestCodec) Decode(in []byte) interface{} {
 }
 
 func (u *UndoLogDeleteRequestCodec) Encode(in interface{}) []byte {
-	data, _ := in.(message.UndoLogDeleteRequest)
+	data := in.(message.UndoLogDeleteRequest)
 	buf := bytes.NewByteBuffer([]byte{})
 
 	buf.WriteByte(byte(data.BranchType))
