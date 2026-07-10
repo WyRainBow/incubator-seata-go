@@ -72,18 +72,6 @@ func TestProcess_ResourceNotFound_ReturnsNil(t *testing.T) {
 	assert.NoError(t, err, "unmanaged resource should be skipped, not treated as an error")
 }
 
-func TestProcess_NegativeSaveDays_ReturnsNil(t *testing.T) {
-	p := &rmDeleteUndoLogProcessor{}
-	err := p.Process(context.Background(), message.RpcMessage{
-		Body: message.UndoLogDeleteRequest{
-			ResourceId: "jdbc:mysql://not-registered:3306/db",
-			SaveDays:   -32768,
-			BranchType: branch.BranchTypeAT,
-		},
-	})
-	assert.NoError(t, err)
-}
-
 type mockDBResource struct {
 	db     *sql.DB
 	dbType types.DBType
@@ -166,36 +154,21 @@ func TestProcess_EndToEnd_DeletesExpiredUndoLog(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestProcess_NonPositiveSaveDays_RejectedBeforeDelete verifies that once a
-// resource IS found and its undo_log table exists, a non-positive SaveDays is
-// rejected before any DELETE is issued (rather than computing a cutoff at/after
-// now and wiping far more rows than intended).
-func TestProcess_NonPositiveSaveDays_RejectedBeforeDelete(t *testing.T) {
-	undo.RegisterUndoLogManager(mysqlundo.NewUndoLogManager())
-
+// TestProcess_NonPositiveSaveDays_RejectedAtEntry verifies that a non-positive
+// SaveDays is rejected at the Process entry, before any DB resource is touched
+// (no resource lookup, no connection, no query) — rather than computing a cutoff
+// at/after now and wiping far more rows than intended.
+func TestProcess_NonPositiveSaveDays_RejectedAtEntry(t *testing.T) {
+	p := &rmDeleteUndoLogProcessor{}
 	for _, saveDays := range []int16{0, -1, -32768} {
-		db, mock, err := sqlmock.New()
-		assert.NoError(t, err)
-
-		const resourceID = "jdbc:mysql://127.0.0.1:3306/seata-savedays-guard"
-		cache := &sync.Map{}
-		cache.Store(resourceID, &mockDBResource{db: db, dbType: types.DBTypeMySQL})
-		rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: cache})
-
-		mock.ExpectQuery("SELECT 1 FROM undo_log LIMIT 1").
-			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-
-		p := &rmDeleteUndoLogProcessor{}
-		err = p.Process(context.Background(), message.RpcMessage{
+		err := p.Process(context.Background(), message.RpcMessage{
 			Body: message.UndoLogDeleteRequest{
-				ResourceId: resourceID,
+				ResourceId: "jdbc:mysql://127.0.0.1:3306/seata-savedays-guard",
 				SaveDays:   saveDays,
 				BranchType: branch.BranchTypeAT,
 			},
 		})
 		assert.Error(t, err, "saveDays=%d must be rejected", saveDays)
-		assert.NoError(t, mock.ExpectationsWereMet(), "no DELETE should be issued for saveDays=%d", saveDays)
-		db.Close()
 	}
 }
 

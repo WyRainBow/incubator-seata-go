@@ -54,6 +54,14 @@ func (r *rmDeleteUndoLogProcessor) Process(ctx context.Context, rpcMessage messa
 		return nil
 	}
 
+	// reject invalid saveDays at the entry, before touching any DB resource: a
+	// non-positive value would push the cutoff to today/the future and delete far
+	// more undo logs than intended
+	if req.SaveDays <= 0 {
+		log.Errorf("skip undo log delete, invalid saveDays: resourceId=%s, saveDays=%d", req.ResourceId, req.SaveDays)
+		return fmt.Errorf("invalid saveDays %d for resourceId %s", req.SaveDays, req.ResourceId)
+	}
+
 	log.Infof("received undo log delete request: resourceId=%s, saveDays=%d",
 		req.ResourceId, req.SaveDays)
 
@@ -88,7 +96,8 @@ func (r *rmDeleteUndoLogProcessor) deleteExpiredUndoLog(ctx context.Context, req
 
 	res, ok := val.(dbResource)
 	if !ok {
-		return fmt.Errorf("resource %s does not implement dbResource interface", req.ResourceId)
+		log.Warnf("skip undo log delete, resource does not implement dbResource: %s", req.ResourceId)
+		return nil
 	}
 
 	conn, err := res.GetDB().Conn(ctx)
@@ -109,11 +118,6 @@ func (r *rmDeleteUndoLogProcessor) deleteExpiredUndoLog(ctx context.Context, req
 	if !exists {
 		log.Infof("undo_log table not exist, skip: resourceId=%s", req.ResourceId)
 		return nil
-	}
-
-	if req.SaveDays <= 0 {
-		log.Errorf("skip undo log delete, invalid saveDays: resourceId=%s, saveDays=%d", req.ResourceId, req.SaveDays)
-		return fmt.Errorf("invalid saveDays %d for resourceId %s", req.SaveDays, req.ResourceId)
 	}
 
 	before := time.Now().AddDate(0, 0, -int(req.SaveDays))
