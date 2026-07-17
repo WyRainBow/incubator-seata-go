@@ -45,6 +45,7 @@ func TestDayValueYAML(t *testing.T) {
 		err = yaml.Unmarshal(expected, &actualStruct)
 		require.NoError(t, err)
 		assert.Equal(t, testStruct, actualStruct)
+		assert.Equal(t, "1985-06-02T00:00:00Z", testStruct.Day.String())
 	}
 
 	// Test pointers of DayValue.
@@ -67,30 +68,6 @@ func TestDayValueYAML(t *testing.T) {
 		err = yaml.Unmarshal(expected, &actualStruct)
 		require.NoError(t, err)
 		assert.Equal(t, testStruct, actualStruct)
-	}
-	// Test UTC-stable string and YAML serialization in western timezones.
-	// DayValue serializes through .UTC() and parses date-only strings as UTC, so
-	// the result is independent of the process local timezone. We therefore do NOT
-	// mutate the global time.Local here: doing so races with the Go runtime's
-	// background timer goroutine (which reads time.Local via time.Now()) under
-	// -race, and has no effect on the code under test anyway.
-	{
-		type TestStruct struct {
-			Day *DayValue `yaml:"day"`
-		}
-		var testStruct TestStruct
-		testStruct.Day = &DayValue{}
-		require.NoError(t, testStruct.Day.Set("1985-06-02"))
-		expected := []byte(`day: "1985-06-02"
-`)
-
-		actual, err := yaml.Marshal(testStruct)
-		require.NoError(t, err)
-		assert.Equal(t, expected, actual)
-
-		var actualStruct TestStruct
-		err = yaml.Unmarshal(expected, &actualStruct)
-		require.NoError(t, err)
-		assert.Equal(t, testStruct, actualStruct)
+		assert.Equal(t, "1985-06-02T00:00:00Z", testStruct.Day.String())
 	}
 }
