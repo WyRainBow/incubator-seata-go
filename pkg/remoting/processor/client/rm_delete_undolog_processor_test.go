@@ -94,13 +94,18 @@ func (f *fakeATResourceManager) GetCachedResources() *sync.Map    { return f.cac
 // deleting (here: no undo log manager for the resource's db type) is surfaced by
 // Process instead of being swallowed, while unmanaged resources are still skipped.
 func TestProcess_RealError_Propagates(t *testing.T) {
-	db, _, err := sqlmock.New()
+	undo.RegisterUndoLogManager(mysqlundo.NewUndoLogManager())
+
+	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
 	cache := &sync.Map{}
-	cache.Store("res-real-err", &mockDBResource{db: db, dbType: types.DBType(99)})
+	cache.Store("res-real-err", &mockDBResource{db: db, dbType: types.DBTypeMySQL})
 	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: cache})
+
+	mock.ExpectQuery("SELECT 1 FROM undo_log LIMIT 1").
+		WillReturnError(errors.New("check table failed"))
 
 	p := &rmDeleteUndoLogProcessor{}
 	err = p.Process(context.Background(), message.RpcMessage{
@@ -111,15 +116,11 @@ func TestProcess_RealError_Propagates(t *testing.T) {
 		},
 	})
 	assert.Error(t, err, "a real internal failure must propagate through Process")
+	assert.Contains(t, err.Error(), "check undo log table")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestProcess_EndToEnd_DeletesExpiredUndoLog drives the full happy path:
-// Process -> deleteExpiredUndoLog -> HasUndoLogTable -> batchDeleteByLogCreated.
-// It is the only test that exercises the resource-found branch (resource in cache,
-// implements dbResource, table exists), covering lines that pure unit tests skip
-// because they short-circuit at "no AT resource manager".
 func TestProcess_EndToEnd_DeletesExpiredUndoLog(t *testing.T) {
-	// make sure a MySQL undo log manager is registered for this test
 	undo.RegisterUndoLogManager(mysqlundo.NewUndoLogManager())
 
 	db, mock, err := sqlmock.New()
@@ -131,10 +132,8 @@ func TestProcess_EndToEnd_DeletesExpiredUndoLog(t *testing.T) {
 	cache.Store(resourceID, &mockDBResource{db: db, dbType: types.DBTypeMySQL})
 	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: cache})
 
-	// HasUndoLogTable issues "SELECT 1 FROM undo_log LIMIT 1" -> table exists
 	mock.ExpectQuery("SELECT 1 FROM undo_log LIMIT 1").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	// first batch is full -> loop once more; second batch is partial -> stop
 	mock.ExpectExec("DELETE FROM undo_log WHERE log_created <= ?").
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, defaultDeleteBatchSize))
@@ -154,10 +153,6 @@ func TestProcess_EndToEnd_DeletesExpiredUndoLog(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestProcess_NonPositiveSaveDays_RejectedAtEntry verifies that a non-positive
-// SaveDays is rejected at the Process entry, before any DB resource is touched
-// (no resource lookup, no connection, no query) — rather than computing a cutoff
-// at/after now and wiping far more rows than intended.
 func TestProcess_NonPositiveSaveDays_RejectedAtEntry(t *testing.T) {
 	p := &rmDeleteUndoLogProcessor{}
 	for _, saveDays := range []int16{0, -1, -32768} {
@@ -172,11 +167,7 @@ func TestProcess_NonPositiveSaveDays_RejectedAtEntry(t *testing.T) {
 	}
 }
 
-// TestProcess_ResourceNotInCache_Skipped covers the broadcast-skip branch: an AT
-// resource manager is registered, but the requested resourceId is not managed by
-// this client. Process must return nil (the request is broadcast to all clients).
 func TestProcess_ResourceNotInCache_Skipped(t *testing.T) {
-	// register an AT manager with an empty cache (no resources managed)
 	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: &sync.Map{}})
 
 	p := &rmDeleteUndoLogProcessor{}
@@ -188,6 +179,33 @@ func TestProcess_ResourceNotInCache_Skipped(t *testing.T) {
 		},
 	})
 	assert.NoError(t, err, "unmanaged resource on a broadcast request should be skipped, not error")
+}
+
+// TestProcess_UnsupportedDbType_Skipped verifies that a non-MySQL AT resource is
+// skipped before any SQL is issued: the DELETE ... LIMIT cleanup is a MySQL
+// dialect extension, and Postgres (which has a registered undo log manager, so
+// the earlier manager lookup would not stop it) rejects the statement on every
+// TC cleanup cycle. The processor must warn and skip instead.
+func TestProcess_UnsupportedDbType_Skipped(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	const resourceID = "jdbc:postgresql://127.0.0.1:5432/seata"
+	cache := &sync.Map{}
+	cache.Store(resourceID, &mockDBResource{db: db, dbType: types.DBTypePostgreSQL})
+	rm.GetRmCacheInstance().RegisterResourceManager(&fakeATResourceManager{cache: cache})
+
+	p := &rmDeleteUndoLogProcessor{}
+	err = p.Process(context.Background(), message.RpcMessage{
+		Body: message.UndoLogDeleteRequest{
+			ResourceId: resourceID,
+			SaveDays:   7,
+			BranchType: branch.BranchTypeAT,
+		},
+	})
+	assert.NoError(t, err, "non-MySQL resource should be skipped, not error")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestBatchDeleteByLogCreated_DeletesRows(t *testing.T) {
@@ -313,6 +331,31 @@ func TestBatchDeleteByLogCreated_CustomBatchSize(t *testing.T) {
 	mock.ExpectExec("DELETE FROM undo_log WHERE log_created <= ?").
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	conn, err := db.Conn(context.Background())
+	assert.NoError(t, err)
+	defer conn.Close()
+
+	p := &rmDeleteUndoLogProcessor{}
+	err = p.batchDeleteByLogCreated(context.Background(), conn, time.Now())
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBatchDeleteByLogCreated_RoundLimitStopsDraining(t *testing.T) {
+	original := undo.UndoConfig.DeleteBatchSize
+	undo.UndoConfig.DeleteBatchSize = 2
+	defer func() { undo.UndoConfig.DeleteBatchSize = original }()
+
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	for i := 0; i < maxDeleteBatchRounds; i++ {
+		mock.ExpectExec("DELETE FROM undo_log WHERE log_created <= ?").
+			WithArgs(sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+	}
 
 	conn, err := db.Conn(context.Background())
 	assert.NoError(t, err)

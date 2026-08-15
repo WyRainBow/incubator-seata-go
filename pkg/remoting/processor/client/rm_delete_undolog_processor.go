@@ -32,7 +32,10 @@ import (
 	"seata.apache.org/seata-go/v2/pkg/util/log"
 )
 
-const defaultDeleteBatchSize = 1000
+const (
+	defaultDeleteBatchSize = 1000
+	maxDeleteBatchRounds   = 100
+)
 
 func initDeleteUndoLog() {
 	getty.GetGettyClientHandlerInstance().RegisterProcessor(
@@ -54,9 +57,6 @@ func (r *rmDeleteUndoLogProcessor) Process(ctx context.Context, rpcMessage messa
 		return nil
 	}
 
-	// reject invalid saveDays at the entry, before touching any DB resource: a
-	// non-positive value would push the cutoff to today/the future and delete far
-	// more undo logs than intended
 	if req.SaveDays <= 0 {
 		log.Errorf("skip undo log delete, invalid saveDays: resourceId=%s, saveDays=%d", req.ResourceId, req.SaveDays)
 		return fmt.Errorf("invalid saveDays %d for resourceId %s", req.SaveDays, req.ResourceId)
@@ -82,14 +82,12 @@ type dbResource interface {
 func (r *rmDeleteUndoLogProcessor) deleteExpiredUndoLog(ctx context.Context, req message.UndoLogDeleteRequest) error {
 	resMgr, err := safeGetResourceManager(req.BranchType)
 	if err != nil {
-		// no AT resource manager on this client, nothing to clean up
 		log.Infof("skip undo log delete, no AT resource manager: %v", err)
 		return nil
 	}
 
 	val, ok := resMgr.GetCachedResources().Load(req.ResourceId)
 	if !ok {
-		// resource not managed by this client (normal for a broadcast request)
 		log.Infof("skip undo log delete, resource not managed by this client: %s", req.ResourceId)
 		return nil
 	}
@@ -97,6 +95,12 @@ func (r *rmDeleteUndoLogProcessor) deleteExpiredUndoLog(ctx context.Context, req
 	res, ok := val.(dbResource)
 	if !ok {
 		log.Warnf("skip undo log delete, resource does not implement dbResource: %s", req.ResourceId)
+		return nil
+	}
+
+	if res.GetDbType() != types.DBTypeMySQL {
+		log.Warnf("skip undo log delete, unsupported dbType %v, only MySQL supported: resourceId=%s",
+			res.GetDbType(), req.ResourceId)
 		return nil
 	}
 
@@ -138,7 +142,7 @@ func (r *rmDeleteUndoLogProcessor) batchDeleteByLogCreated(ctx context.Context, 
 	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE log_created <= ? LIMIT %d", undoLogTable, batchSize)
 
 	totalAffected := int64(0)
-	for {
+	for round := 1; ; round++ {
 		result, err := conn.ExecContext(ctx, deleteSQL, before)
 		if err != nil {
 			return fmt.Errorf("exec delete: %w", err)
@@ -150,6 +154,11 @@ func (r *rmDeleteUndoLogProcessor) batchDeleteByLogCreated(ctx context.Context, 
 		totalAffected += affected
 		if affected < int64(batchSize) {
 			break
+		}
+		if round >= maxDeleteBatchRounds {
+			log.Warnf("undo log delete stopped at round limit %d, leftover rows wait for the next request: before=%v, totalAffected=%d",
+				maxDeleteBatchRounds, before, totalAffected)
+			return nil
 		}
 	}
 

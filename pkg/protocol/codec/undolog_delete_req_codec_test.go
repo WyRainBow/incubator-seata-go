@@ -192,29 +192,69 @@ func TestUndoLogDeleteRequestCodec_GetMessageType(t *testing.T) {
 		"message type should be MessageTypeRmDeleteUndolog (111)")
 }
 
-// TestUndoLogDeleteRequestCodec_JavaWireFormat locks the byte layout to the Java
-// UndoLogDeleteRequestCodec, which is what the TC server actually sends:
-// branchType(1 byte) + resourceId(2-byte length + UTF8 bytes) + saveDays(2 bytes).
-// A pure encode/decode round-trip cannot catch a wrong field order; only a fixed
-// byte vector can.
+// Byte vectors hand-derived from Java UndoLogDeleteRequestCodec#encode:
+// branchType ordinal (1 byte) + resourceId (uint16-BE length + UTF-8) + saveDays (int16-BE).
 func TestUndoLogDeleteRequestCodec_JavaWireFormat(t *testing.T) {
 	c := &UndoLogDeleteRequestCodec{}
 
-	resourceId := "jdbc:mysql://127.0.0.1:3306/seata"
-	javaBytes := []byte{0x00} // BranchType.AT ordinal
-	javaBytes = append(javaBytes, byte(len(resourceId)>>8), byte(len(resourceId)))
-	javaBytes = append(javaBytes, resourceId...)
-	javaBytes = append(javaBytes, 0x00, 0x07) // saveDays = 7
+	tests := []struct {
+		name string
+		in   []byte
+		want message.UndoLogDeleteRequest
+	}{
+		{
+			name: "AT mysql resource 7 days",
+			in: []byte{
+				0x00,
+				0x00, 0x21,
+				'j', 'd', 'b', 'c', ':', 'm', 'y', 's', 'q', 'l', ':', '/', '/',
+				'1', '2', '7', '.', '0', '.', '0', '.', '1', ':', '3', '3', '0', '6',
+				'/', 's', 'e', 'a', 't', 'a',
+				0x00, 0x07,
+			},
+			want: message.UndoLogDeleteRequest{
+				BranchType: branch.BranchTypeAT,
+				ResourceId: "jdbc:mysql://127.0.0.1:3306/seata",
+				SaveDays:   7,
+			},
+		},
+		{
+			name: "AT empty resource id 30 days",
+			in:   []byte{0x00, 0x00, 0x00, 0x00, 0x1e},
+			want: message.UndoLogDeleteRequest{
+				BranchType: branch.BranchTypeAT,
+				ResourceId: "",
+				SaveDays:   30,
+			},
+		},
+		{
+			name: "AT negative save days two complement",
+			in:   []byte{0x00, 0x00, 0x02, 'p', 'g', 0xff, 0xff},
+			want: message.UndoLogDeleteRequest{
+				BranchType: branch.BranchTypeAT,
+				ResourceId: "pg",
+				SaveDays:   -1,
+			},
+		},
+		{
+			name: "XA ordinal 3 14 days",
+			in:   []byte{0x03, 0x00, 0x02, 'x', 'a', 0x00, 0x0e},
+			want: message.UndoLogDeleteRequest{
+				BranchType: branch.BranchTypeXA,
+				ResourceId: "xa",
+				SaveDays:   14,
+			},
+		},
+	}
 
-	decoded := c.Decode(javaBytes)
-	req, ok := decoded.(message.UndoLogDeleteRequest)
-	assert.True(t, ok, "decoded result should be UndoLogDeleteRequest type")
-	assert.Equal(t, branch.BranchTypeAT, req.BranchType)
-	assert.Equal(t, resourceId, req.ResourceId)
-	assert.Equal(t, int16(7), req.SaveDays)
-
-	// Encode must produce exactly the same bytes the Java codec would.
-	assert.Equal(t, javaBytes, c.Encode(req))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, ok := c.Decode(tt.in).(message.UndoLogDeleteRequest)
+			assert.True(t, ok, "decoded result should be UndoLogDeleteRequest type")
+			assert.Equal(t, tt.want, req)
+			assert.Equal(t, tt.in, c.Encode(tt.want), "encode must reproduce the Java bytes exactly")
+		})
+	}
 }
 
 func TestUndoLogDeleteRequestCodec_DecodeMalformed(t *testing.T) {
